@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta, UTC
 
 from chain_of_alpha_nasdaq import data_handler
-from chain_of_alpha_nasdaq.sqlite_store import SQLiteStore as DuckDBStore
+from chain_of_alpha_nasdaq.sqlite_store import SQLiteStore
 from chain_of_alpha_nasdaq.alpha_db import AlphaDB
 from chain_of_alpha_nasdaq.portfolio import Portfolio
 from chain_of_alpha_nasdaq.broker.paper_broker import PaperBroker
@@ -25,12 +25,12 @@ class LiveAlphaAgent:
     def __init__(
         self,
         db_path: str = "alphas.db",
-        duck_path: str = "market.duckdb",
+        store_path: str = "data/alpha_live.sqlite",
         ticker_limit: int = DEFAULT_TICKER_LIMIT,
         tickers: list[str] | None = None,
     ):
         self.db = AlphaDB(db_path)
-        self.db_store = DuckDBStore(duck_path)
+        self.db_store = SQLiteStore(store_path)
         self.portfolio = Portfolio(top_k=20)
         self.ticker_limit = ticker_limit
         self.tickers = tickers or self._load_tickers()
@@ -195,7 +195,7 @@ class LiveAlphaAgent:
 
         # Execute
         self.broker.execute_trades(trades, data, run_id)
-        print(f"🦆 Data persisted to alpha_live.duckdb with run_id={run_id}")
+        print(f"🦆 Data persisted to alpha_live.sqlite with run_id={run_id}")
         print("✅ Cycle complete.")
         return trades
 

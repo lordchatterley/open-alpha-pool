@@ -161,11 +161,6 @@ def run_full_scan(limit=None, lookback_days=None, verbose=False):
                 f"Missing required columns for long-format data: {combined.columns.tolist()}"
             )
 
-
-    # Connect LiveAlphaAgent
-    agent = LiveAlphaAgent(ticker_limit=len(tickers))
-
-
     # Connect LiveAlphaAgent
     agent = LiveAlphaAgent(ticker_limit=len(tickers))
     agent.tickers = tickers

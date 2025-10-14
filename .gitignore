@@ -1,4 +1,32 @@
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# venv / env
 .env
-market.duckdb
+.venv
+env/
+venv/
+
+# data & artifacts
+data/**/*.parquet
+data/*.parquet
 data/alpha_live.sqlite
-data/market.duckdb
+data/reports/**
+data/cache/**
+market.duckdb
+*.db
+*.sqlite
+*.sqlite3
+
+# models
+data/models/**
+*.pkl
+*.joblib
+
+# notebooks
+*.ipynb_checkpoints/
+
+# macOS
+.DS_Store

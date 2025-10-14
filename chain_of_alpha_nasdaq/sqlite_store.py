@@ -58,7 +58,7 @@ class SQLiteStore:
             active INTEGER DEFAULT 1
         );
                           
-        # --- add inside cur.executescript(""" ... """) ---
+        -- added tables for features, labels, models, predictions
         CREATE TABLE IF NOT EXISTS features (
             run_id TEXT,
             date TEXT,
