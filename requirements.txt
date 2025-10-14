@@ -1,0 +1,14 @@
+# Core stack
+pandas>=2.2.0
+numpy>=1.26.0
+requests>=2.31.0
+python-dotenv>=1.0.1
+
+# Evaluation engine
+numexpr>=2.9.0
+
+# Database (current + future)
+duckdb>=1.1.0
+
+# Optional: if you’re doing scheduling soon
+schedule>=1.2.1

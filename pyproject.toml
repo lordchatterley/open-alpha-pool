@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chain_of_alpha_nasdaq"
+version = "0.1.0"
+description = "Chain-of-Alpha: LLM-driven alpha mining and portfolio construction for NASDAQ stocks"
+authors = [
+  { name = "Your Name", email = "your.email@example.com" }
+]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "scikit-learn>=1.3",
+    "lightgbm>=4.0",
+    "yfinance>=0.2",
+    "python-dotenv>=1.0",
+    "openai>=1.0",
+    "requests>=2.31",
+    "pytest>=8.0",
+    "typer[all]>=0.9"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["chain_of_alpha_nasdaq*"]
+
+[project.scripts]
+chain-alpha = "chain_of_alpha_nasdaq.cli:app"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-v --tb=short"
+testpaths = [
+    "tests"
+]
+python_files = [
+    "test_*.py"
+]
+

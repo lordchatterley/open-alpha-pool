@@ -1,0 +1,2 @@
+[console_scripts]
+chain-alpha = chain_of_alpha_nasdaq.cli:app
