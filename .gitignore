@@ -1,1 +1,4 @@
 .env
+market.duckdb
+data/alpha_live.sqlite
+data/market.duckdb
