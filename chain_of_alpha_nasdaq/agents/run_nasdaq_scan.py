@@ -126,7 +126,13 @@ def run_full_scan(limit=None, lookback_days=None, verbose=False):
 
         # Combine all data
     combined = pd.concat(all_data, ignore_index=True)
-    combined.columns = [c.strip().lower() for c in combined.columns]
+    if isinstance(combined.columns, pd.MultiIndex):
+        combined.columns = [
+            f"{ticker}_{field}".strip().lower()
+            for ticker, field in combined.columns.to_flat_index()
+        ]
+    else:
+        combined.columns = [str(c).strip().lower() for c in combined.columns]
 
     print(f"📊 Combined NASDAQ dataset shape: {combined.shape}")
     print(f"🧩 Combined columns: {combined.columns.tolist()}")

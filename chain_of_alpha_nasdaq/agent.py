@@ -1,7 +1,10 @@
 import os
-import pandas as pd
-import numpy as np
+from pathlib import Path
 from datetime import datetime
+
+import numpy as np
+import pandas as pd
+
 from chain_of_alpha_nasdaq import (
     data_handler,
     factor_generation,
@@ -9,6 +12,7 @@ from chain_of_alpha_nasdaq import (
     portfolio,
 )
 from chain_of_alpha_nasdaq.alpha_db import AlphaDB
+from chain_of_alpha_nasdaq.alpha_pool import AlphaPool
 
 
 class ChainOfAlphaAgent:
@@ -23,11 +27,45 @@ class ChainOfAlphaAgent:
       5. Construct a portfolio and backtest it.
     """
 
-    def __init__(self, tickers, db_path="alphas.db", model="gpt-4o-mini"):
+    def __init__(
+        self,
+        tickers,
+        db_path="alphas.db",
+        model="gpt-4o-mini",
+        signal_store_dir: str | os.PathLike[str] = "artifacts/factor_signals",
+    ):
         self.tickers = tickers
         self.db = AlphaDB(db_path)
         self.generator = factor_generation.FactorGenerator(model=model)
         self.optimizer = factor_optimization.FactorOptimizer()
+        self.pool = AlphaPool()
+        self.signal_store = Path(signal_store_dir)
+        self.signal_store.mkdir(parents=True, exist_ok=True)
+
+    def _persist_signals(
+        self,
+        factor_name: str,
+        signals: pd.DataFrame,
+        category: str = "candidates",
+    ) -> Path:
+        directory = self.signal_store / category
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{factor_name}.csv"
+        signals.to_csv(path)
+        return path
+
+    def _load_effective_signals(self) -> dict[str, pd.DataFrame]:
+        stored: dict[str, pd.DataFrame] = {}
+        effective_dir = self.signal_store / "effective"
+        if not effective_dir.exists():
+            return stored
+        for csv_path in effective_dir.glob("*.csv"):
+            try:
+                df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
+                stored[csv_path.stem] = df
+            except Exception:
+                continue
+        return stored
 
     def run_pipeline(self, start="2020-01-01", end="2024-01-01", num_new_factors=3):
         """
@@ -51,31 +89,53 @@ class ChainOfAlphaAgent:
         if isinstance(seed_factors, list):
             seed_factors = {f"alpha_{i+1}": f for i, f in enumerate(seed_factors)}
 
-        factor_signals = {}
+        factor_signals: dict[str, pd.DataFrame] = {}
+        effective_signals = self._load_effective_signals()
 
         # === Optimize and store each factor ===
         for name, formula in seed_factors.items():
             print(f"\n🔧 Optimizing {name}: {formula}")
             try:
-                optimized_formula, metrics = self.optimizer.optimize_factor(formula, data)
-                print(f"✅ {name} optimized → {optimized_formula}")
+                evaluation = self.optimizer.optimize_factor(
+                    factor_name=name,
+                    formula=formula,
+                    data=data,
+                    existing_signals=effective_signals.values(),
+                )
 
-                # Insert or update in DB
-                self.db.insert_factor(name, optimized_formula)
+                if evaluation is None:
+                    print(f"⚠️ Optimization failed for {name}: no metrics produced.")
+                    continue
 
-                if not isinstance(metrics, dict):
-                    metrics = {"ic": 0.0, "rankic": 0.0, "sharpe": 0.0}
+                print(f"✅ {name} optimized → {evaluation.formula}")
+
+                self.db.insert_factor(name, evaluation.formula)
+
+                metrics = evaluation.metrics.copy()
+                metrics_lower = {k.lower(): v for k, v in metrics.items()}
 
                 self.db.insert_metrics(
                     factor_name=name,
                     run_id=f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                    metrics=metrics,
+                    metrics={
+                        "ic": metrics_lower.get("ic"),
+                        "rankic": metrics_lower.get("rankic"),
+                        "icir": metrics_lower.get("icir"),
+                        "rankicir": metrics_lower.get("rankicir"),
+                        "turnover": metrics_lower.get("turnover"),
+                    },
                 )
 
-                # Create a mock signal for this factor
-                factor_signals[name] = pd.Series(
-                    np.random.randn(len(data)), index=getattr(data, "index", None)
-                )
+                factor_signals[name] = evaluation.signals
+                candidate_path = self._persist_signals(name, evaluation.signals, "candidates")
+
+                is_effective = self.pool.add_factor(name, evaluation.formula, metrics)
+                if is_effective:
+                    effective_signals[name] = evaluation.signals
+                    persisted_path = self._persist_signals(name, evaluation.signals, "effective")
+                    print(f"💾 Stored signals for {name} at {persisted_path}")
+                else:
+                    print(f"🚧 {name} did not meet pool thresholds; candidate saved at {candidate_path}")
 
             except Exception as e:
                 print(f"⚠️ Optimization failed for {name}: {e}")
@@ -85,11 +145,12 @@ class ChainOfAlphaAgent:
             return None
 
         print("🔗 Combining factor signals into aggregate alpha...")
-        combined_signal = pd.concat(list(factor_signals.values()), axis=1).mean(axis=1)
-
-        # Ensure DataFrame format
-        if isinstance(combined_signal, pd.Series):
-            combined_signal = combined_signal.to_frame("aggregate_alpha")
+        selected_signals = effective_signals if effective_signals else factor_signals
+        combined_sum: pd.DataFrame | None = None
+        for frame in selected_signals.values():
+            combined_sum = frame if combined_sum is None else combined_sum.add(frame, fill_value=0.0)
+        combined_signal = combined_sum.divide(len(selected_signals)) if combined_sum is not None else pd.DataFrame()
+        combined_signal.index.name = "Date"
 
         print("📈 Constructing portfolio and running backtest...")
         port = portfolio.Portfolio(top_k=20)

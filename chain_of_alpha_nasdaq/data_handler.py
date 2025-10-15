@@ -1,9 +1,14 @@
 import os
-import pandas as pd
+from pathlib import Path
+import importlib
+import io
+from collections.abc import Iterable, Sequence
+
 import numpy as np
+import pandas as pd
 import requests
-from datetime import datetime
 from dotenv import load_dotenv
+
 load_dotenv()
 
 # -------------------------------------------------------------------
@@ -45,45 +50,236 @@ def fetch_polygon(symbol: str, start: str, end: str, api_key: str | None = None)
     print(f"✅ Got {len(df)} rows for {symbol} ({df['date'].min().date()} → {df['date'].max().date()})")
     return df
 
-def fetch_data(tickers, start="2020-01-01", end="2024-01-01"):
-    import os
-    import pandas as pd
+STANDARD_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 
+
+def _standardize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a clean OHLCV frame with a DateTime index and canonical columns."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=STANDARD_COLUMNS)
+
+    frame = df.copy()
+
+    # Normalise column names to lower case for matching
+    frame.columns = [str(col).lower() for col in frame.columns]
+
+    if "date" in frame.columns:
+        idx = pd.to_datetime(frame.pop("date"), errors="coerce")
+    else:
+        idx = pd.to_datetime(frame.index, errors="coerce")
+
+    frame.index = idx
+    frame = frame.sort_index()
+
+    canonical = pd.DataFrame(index=frame.index)
+    column_map = {
+        "open": "Open",
+        "high": "High",
+        "low": "Low",
+        "close": "Close",
+        "volume": "Volume",
+    }
+
+    for raw_name, canonical_name in column_map.items():
+        if raw_name in frame.columns:
+            series = pd.to_numeric(frame[raw_name], errors="coerce")
+        elif canonical_name.lower() in frame.columns:
+            series = pd.to_numeric(frame[canonical_name.lower()], errors="coerce")
+        elif canonical_name in frame.columns:
+            series = pd.to_numeric(frame[canonical_name], errors="coerce")
+        else:
+            series = pd.Series(np.nan, index=frame.index)
+        canonical[canonical_name] = series
+
+    canonical = canonical.dropna(how="all")
+    canonical = canonical[STANDARD_COLUMNS]
+    canonical.index.name = "Date"
+    canonical = canonical[~canonical.index.duplicated(keep="first")]
+    return canonical
+
+
+def _fetch_yfinance(ticker: str, start: str, end: str) -> pd.DataFrame:
+    """Download data via yfinance if the package is available."""
+    if importlib.util.find_spec("yfinance") is None:
+        return pd.DataFrame()
+
+    yf = importlib.import_module("yfinance")
+    data = yf.download(
+        ticker,
+        start=start,
+        end=end,
+        auto_adjust=False,
+        progress=False,
+    )
+    if data is None or data.empty:
+        return pd.DataFrame()
+
+    data = data.reset_index()
+    data.rename(columns={"Adj Close": "Close"}, inplace=True)
+    return data[[col for col in data.columns if col.lower() in {"date", "open", "high", "low", "close", "volume"}]]
+
+
+def _load_local_fixture(ticker: str, directory: str | os.PathLike[str] | None) -> pd.DataFrame:
+    if directory is None:
+        return pd.DataFrame()
+
+    path = Path(directory) / f"{ticker}.csv"
+    if not path.exists():
+        return pd.DataFrame()
+
+    df = pd.read_csv(path)
+    return df
+
+
+def _load_nasdaq_directory() -> list[str]:
+    """Fallback loader for NASDAQ symbol directory (no API key required)."""
+    url = "https://ftp.nasdaqtrader.com/dynamic/SYMBOLDirectory/nasdaqlisted.txt"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            raise RuntimeError(f"HTTP {resp.status_code}")
+
+        df = pd.read_csv(io.StringIO(resp.text), sep="|")
+        if "Symbol" not in df.columns:
+            raise RuntimeError("Invalid NASDAQ directory schema")
+
+        df = df[df.get("Test Issue", "N") == "N"]
+        symbols = [sym.strip().upper() for sym in df["Symbol"].dropna().unique().tolist() if sym]
+        return symbols
+    except Exception as exc:
+        print(f"⚠️ Fallback NASDAQ directory download failed: {exc}")
+        return []
+
+
+def _resolve_tickers(tickers: Sequence[str] | str | Iterable[str]) -> list[str]:
+    """Accept a list of tickers or a named universe."""
+
+    if isinstance(tickers, str):
+        universe = tickers.strip().lower()
+        if universe != "nasdaq":
+            raise ValueError(f"Unsupported ticker universe: {tickers}")
+
+        try:
+            from chain_of_alpha_nasdaq.utils import ticker_fetcher
+
+            df = ticker_fetcher.fetch_nasdaq_tickers()
+            if "ticker" in df.columns:
+                symbols = df["ticker"].astype(str).str.strip()
+            else:
+                symbols = df.iloc[:, 0].astype(str).str.strip()
+            resolved = [sym.upper() for sym in symbols.tolist() if sym]
+            if resolved:
+                return resolved
+        except Exception as exc:
+            print(f"⚠️ Polygon NASDAQ fetch unavailable: {exc}")
+
+        fallback = _load_nasdaq_directory()
+        if fallback:
+            return fallback
+        raise RuntimeError("Unable to resolve NASDAQ ticker universe")
+
+    if isinstance(tickers, Iterable):
+        resolved = [str(t).strip().upper() for t in tickers if str(t).strip()]
+        if not resolved:
+            raise ValueError("Ticker list is empty")
+        return resolved
+
+    raise TypeError("tickers must be a sequence or a supported universe name")
+
+
+def fetch_data(
+    tickers: Sequence[str] | str | Iterable[str],
+    start="2020-01-01",
+    end="2024-01-01",
+    source: str | None = None,
+    local_dir: str | os.PathLike[str] | None = None,
+):
+    """Fetch daily OHLCV data for one or more tickers.
+
+    Args:
+        tickers: Sequence of tickers or the string "nasdaq" to request the full
+            NASDAQ universe (resolved via Polygon when available, falling back to
+            the public NASDAQ Trader symbol directory).
+        start: ISO date string for the inclusive start of the history window.
+        end: ISO date string for the inclusive end of the history window.
+        source: Force a specific data source ("polygon", "yfinance", "local").
+            If omitted the loader chooses Polygon when an API key is present and
+            otherwise falls back to yfinance and finally local fixtures.
+        local_dir: Optional directory containing ``{ticker}.csv`` fixtures used
+            for regression tests or offline development.
+
+    Returns:
+        ``pd.DataFrame`` indexed by ``Date`` with a ``MultiIndex`` over columns
+        ``["Ticker", "Field"]`` providing the canonical OHLCV schema for each
+        successfully loaded symbol.
+    """
     api_key = os.getenv("POLYGON_API_KEY")
-    if not api_key:
-        raise RuntimeError("POLYGON_API_KEY not found in environment")
 
-    all_dfs = []
+    if source is None:
+        source = "polygon" if api_key else "yfinance"
 
-    for ticker in tickers:
+    source = source.lower()
+    if source not in {"polygon", "yfinance", "local"}:
+        raise ValueError("source must be 'polygon', 'yfinance', or 'local'")
+
+    def _source_sequence():
+        if source == "polygon":
+            if api_key:
+                yield "polygon"
+            yield "yfinance"
+            yield "local"
+        elif source == "yfinance":
+            yield "yfinance"
+            yield "local"
+        else:
+            yield "local"
+
+    all_dfs: list[pd.DataFrame] = []
+    start_ts = pd.to_datetime(start)
+    end_ts = pd.to_datetime(end)
+
+    resolved_tickers = _resolve_tickers(tickers)
+
+    for ticker in resolved_tickers:
         print(f"📡 Fetching {ticker} data...")
-        df = fetch_polygon(ticker, start, end, api_key)
-        if df is None or df.empty:
-            print(f"⚠️ Could not fetch data for {ticker}, skipping.")
+        frame = pd.DataFrame()
+
+        for src in _source_sequence():
+            if src == "polygon":
+                try:
+                    frame = fetch_polygon(ticker, start, end, api_key)
+                except Exception as exc:
+                    print(f"⚠️ Polygon fetch failed for {ticker}: {exc}")
+                    frame = pd.DataFrame()
+            elif src == "yfinance":
+                frame = _fetch_yfinance(ticker, start, end)
+            else:
+                frame = _load_local_fixture(ticker, local_dir)
+
+            frame = _standardize_ohlcv(frame)
+            if not frame.empty:
+                break
+
+        if frame.empty:
+            print(f"⚠️ No market data retrieved for {ticker}.")
             continue
 
-        # ✅ normalize column case & ensure date index
-        df.columns = [c.capitalize() for c in df.columns]
-        df["Date"] = pd.to_datetime(df["Date"])
-        df.set_index("Date", inplace=True)
+        frame = frame.loc[(frame.index >= start_ts) & (frame.index <= end_ts)]
+        frame.columns = pd.MultiIndex.from_arrays(
+            [[ticker] * len(frame.columns), frame.columns], names=["Ticker", "Field"]
+        )
+        all_dfs.append(frame)
 
-        # prefix columns for multi-ticker clarity
-        df = df.add_prefix(f"{ticker}_")
-        all_dfs.append(df)
-
-        print(f"✅ Got {len(df)} rows from Polygon for {ticker}")
+        print(f"✅ {ticker}: {len(frame)} rows loaded after harmonisation.")
 
     if not all_dfs:
         raise RuntimeError("No market data available from any source.")
 
-    # ✅ Outer join to preserve all dates
     combined = pd.concat(all_dfs, axis=1, join="outer").sort_index()
+    combined = combined.loc[(combined.index >= start_ts) & (combined.index <= end_ts)]
+    combined.index.name = "Date"
 
-    # ✅ Trim to range
-    mask = (combined.index >= pd.to_datetime(start)) & (combined.index <= pd.to_datetime(end))
-    combined = combined.loc[mask]
-
-    print(f"📊 Final dataset shape: {combined.shape[0]} rows, {len(tickers)} tickers.")
+    print(f"📊 Final dataset shape: {combined.shape[0]} rows, {len(all_dfs)} tickers with data.")
     return combined
 
 # -------------------------------------------------------------------
