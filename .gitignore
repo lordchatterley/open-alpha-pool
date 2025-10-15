@@ -16,6 +16,7 @@ data/alpha_live.sqlite
 data/reports/**
 data/cache/**
 market.duckdb
+*.duckdb
 *.db
 *.sqlite
 *.sqlite3
