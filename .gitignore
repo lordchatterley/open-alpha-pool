@@ -31,3 +31,7 @@ data/models/**
 
 # macOS
 .DS_Store
+**/.DS_Store
+._*
+.Trashes
+.Spotlight-V100
