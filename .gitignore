@@ -35,3 +35,7 @@ data/models/**
 ._*
 .Trashes
 .Spotlight-V100
+
+# VS Code
+.vscode/
+*.code-workspace
